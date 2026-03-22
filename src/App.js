@@ -327,7 +327,7 @@ Please answer based on the document excerpts above. If you reference specific in
       <header className="topbar">
           <div className="topbar-brand">
             <div className="topbar-logo">
-            <img src="/Webclip_white.png" alt="Northern Light" style={{width:30,height:30,borderRadius:7,objectFit:'cover'}} />
+            <img src="/Webclip white.png" alt="Northern Light" style={{width:30,height:30,borderRadius:7,objectFit:'cover'}} />
             </div>
           <div>
             <div className="topbar-title">Northern Light</div>

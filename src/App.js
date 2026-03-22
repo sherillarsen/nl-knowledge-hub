@@ -1,318 +1,544 @@
-import React, { useState, useRef, useEffect } from 'react';
-import * as mammoth from 'mammoth';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import './App.css';
 
-const ARTIFACT_TYPES = [
-  'Release Notes',
-  'Demo Transcript',
-  'Training Transcript',
-  'White Paper',
-  'Positioning Material',
-  'Case Study',
-  'Technical Documentation',
-  'Network Diagram / Architecture',
-  'Security / SOC Report',
-  'Compliance Documentation',
-  'RFP Response',
-  'Other',
-];
+// ── Text extraction utilities ──────────────────────────────────────────────
 
-const CHUNK_SIZE = 1200;
-const CHUNK_OVERLAP = 200;
-
-function chunkText(text, filename, type) {
-  const chunks = [];
-  let start = 0;
-  while (start < text.length) {
-    const end = Math.min(start + CHUNK_SIZE, text.length);
-    chunks.push({ text: text.slice(start, end), source: filename, type });
-    start += CHUNK_SIZE - CHUNK_OVERLAP;
+async function extractTextFromPDF(file) {
+  const pdfjsLib = window['pdfjs-dist/build/pdf'];
+  if (!pdfjsLib) throw new Error('PDF library not loaded');
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let text = '';
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    text += content.items.map(item => item.str).join(' ') + '\n\n';
   }
-  return chunks;
+  return text.trim();
 }
 
-function scoreChunk(chunk, query) {
-  const q = query.toLowerCase();
-  const t = chunk.text.toLowerCase();
-  const words = q.split(/\s+/).filter(w => w.length > 3);
-  let score = 0;
-  for (const word of words) {
-    const count = (t.match(new RegExp(word, 'g')) || []).length;
-    score += count;
-  }
-  return score;
+async function extractTextFromDocx(file) {
+  const mammoth = window.mammoth;
+  if (!mammoth) throw new Error('Mammoth library not loaded');
+  const arrayBuffer = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ arrayBuffer });
+  return result.value.trim();
 }
 
-function getRelevantChunks(chunks, query, topK = 8) {
-  return chunks
-    .map(c => ({ ...c, score: scoreChunk(c, query) }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK)
-    .filter(c => c.score > 0);
+async function extractTextFromTxt(file) {
+  return await file.text();
 }
 
-async function extractTextFromFile(file) {
+async function extractText(file) {
   const ext = file.name.split('.').pop().toLowerCase();
-  if (ext === 'txt' || ext === 'md') {
-    return await file.text();
-  }
-  if (ext === 'pdf') {
-    const pdfjsLib = await import('pdfjs-dist');
-    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
-    const arrayBuffer = await file.arrayBuffer();
-    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-    let text = '';
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const content = await page.getTextContent();
-      text += content.items.map(item => item.str).join(' ') + '\n';
-    }
-    return text;
-  }
-  if (ext === 'docx') {
-    const arrayBuffer = await file.arrayBuffer();
-    const result = await mammoth.extractRawText({ arrayBuffer });
-    return result.value;
-  }
+  if (ext === 'pdf') return await extractTextFromPDF(file);
+  if (ext === 'docx' || ext === 'doc') return await extractTextFromDocx(file);
+  if (ext === 'txt' || ext === 'md') return await extractTextFromTxt(file);
   throw new Error(`Unsupported file type: .${ext}`);
 }
 
-const styles = {
-  app: { fontFamily: "'DM Sans', sans-serif", minHeight: '100vh', background: '#f8f7f4', color: '#1a1a18' },
-  header: { background: '#fff', borderBottom: '1px solid rgba(0,0,0,0.08)', padding: '0 32px', height: 56, display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'sticky', top: 0, zIndex: 100 },
-  logoRow: { display: 'flex', alignItems: 'center', gap: 10 },
-  logoMark: { width: 30, height: 30, background: '#0F2A4A', borderRadius: 7, display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  logoText: { fontFamily: "'DM Serif Display', serif", fontSize: 16, color: '#0F2A4A', lineHeight: 1.1 },
-  logoSub: { fontSize: 10, color: '#888', letterSpacing: '0.08em', textTransform: 'uppercase' },
-  docCount: { fontSize: 12, color: '#888', background: '#f0ede8', padding: '3px 10px', borderRadius: 100 },
-  layout: { display: 'flex', height: 'calc(100vh - 56px)' },
-  sidebar: { width: 280, flexShrink: 0, background: '#fff', borderRight: '1px solid rgba(0,0,0,0.07)', display: 'flex', flexDirection: 'column', overflow: 'hidden' },
-  sidebarHead: { padding: '16px 16px 8px', fontSize: 11, fontWeight: 500, color: '#999', letterSpacing: '0.07em', textTransform: 'uppercase' },
-  uploadZone: { margin: '0 12px', border: '1.5px dashed rgba(0,0,0,0.15)', borderRadius: 10, padding: '16px 12px', textAlign: 'center', cursor: 'pointer', transition: 'all 0.15s', background: 'transparent' },
-  typeSelect: { margin: '8px 12px 0', width: 'calc(100% - 24px)', fontSize: 12, padding: '7px 10px', borderRadius: 7, border: '1px solid rgba(0,0,0,0.12)', background: '#fff', color: '#1a1a18', outline: 'none' },
-  docList: { flex: 1, overflowY: 'auto', padding: '8px 12px', marginTop: 8 },
-  docItem: { display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 10px', borderRadius: 8, marginBottom: 4, background: '#f8f7f4', border: '1px solid rgba(0,0,0,0.06)' },
-  docName: { fontSize: 12, fontWeight: 500, color: '#1a1a18', wordBreak: 'break-word', lineHeight: 1.3 },
-  docType: { fontSize: 10, color: '#888', marginTop: 2 },
-  docRemove: { marginLeft: 'auto', fontSize: 14, color: '#ccc', cursor: 'pointer', flexShrink: 0, background: 'none', border: 'none', padding: 0, lineHeight: 1 },
-  main: { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
-  chatArea: { flex: 1, overflowY: 'auto', padding: '24px 32px', display: 'flex', flexDirection: 'column', gap: 16 },
-  emptyState: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12, opacity: 0.5, padding: 40, textAlign: 'center' },
-  emptyTitle: { fontFamily: "'DM Serif Display', serif", fontSize: 20, color: '#0F2A4A' },
-  emptySub: { fontSize: 13, color: '#888', maxWidth: 320, lineHeight: 1.5 },
-  suggestionRow: { display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', marginTop: 8 },
-  suggestionPill: { padding: '7px 14px', borderRadius: 100, border: '1px solid rgba(0,0,0,0.12)', fontSize: 12, cursor: 'pointer', background: '#fff', color: '#444', transition: 'all 0.1s' },
-  msgRow: { display: 'flex', gap: 10, alignItems: 'flex-start', maxWidth: 760 },
-  msgRowUser: { alignSelf: 'flex-end', flexDirection: 'row-reverse', maxWidth: 600 },
-  avatar: { width: 28, height: 28, borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 500, flexShrink: 0 },
-  avatarAI: { background: '#0F2A4A', color: '#fff' },
-  avatarUser: { background: '#dbeafe', color: '#1A5FA8' },
-  bubble: { padding: '10px 14px', borderRadius: 12, fontSize: 13, lineHeight: 1.6, color: '#1a1a18', background: '#fff', border: '1px solid rgba(0,0,0,0.07)', maxWidth: '100%' },
-  bubbleUser: { background: '#0F2A4A', color: '#fff', border: 'none' },
-  sources: { display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 8 },
-  sourceChip: { display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 100, fontSize: 11, background: '#eef3fb', color: '#1A5FA8', border: '1px solid rgba(26,95,168,0.15)' },
-  ratingRow: { display: 'flex', gap: 6, marginTop: 8, alignItems: 'center' },
-  ratingLabel: { fontSize: 11, color: '#aaa' },
-  ratingBtn: { fontSize: 14, cursor: 'pointer', background: 'none', border: 'none', padding: '2px 4px', borderRadius: 4, opacity: 0.5, transition: 'opacity 0.1s' },
-  loadingDots: { display: 'flex', gap: 4, alignItems: 'center', padding: '2px 0' },
-  inputArea: { padding: '16px 32px 20px', background: '#fff', borderTop: '1px solid rgba(0,0,0,0.07)' },
-  inputRow: { display: 'flex', gap: 8, alignItems: 'flex-end', background: '#f8f7f4', borderRadius: 12, border: '1px solid rgba(0,0,0,0.1)', padding: '8px 12px' },
-  textarea: { flex: 1, border: 'none', background: 'transparent', fontSize: 13, fontFamily: "'DM Sans', sans-serif", color: '#1a1a18', resize: 'none', outline: 'none', lineHeight: 1.5, maxHeight: 120, minHeight: 22 },
-  sendBtn: { width: 32, height: 32, borderRadius: 8, background: '#0F2A4A', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
-  sendBtnDisabled: { opacity: 0.35, cursor: 'default' },
-  processingBadge: { fontSize: 11, color: '#1A5FA8', background: '#eef3fb', padding: '2px 8px', borderRadius: 100, marginLeft: 8 },
-  noResults: { background: '#fff8ed', border: '1px solid rgba(245,158,11,0.2)', borderRadius: 8, padding: '10px 14px', fontSize: 13, color: '#92400e' },
-};
+// ── Chunking ──────────────────────────────────────────────────────────────
 
-const FILE_ICONS = { pdf: '📄', docx: '📝', doc: '📝', txt: '📃', md: '📃', default: '📎' };
-function fileIcon(name) { const ext = name.split('.').pop().toLowerCase(); return FILE_ICONS[ext] || FILE_ICONS.default; }
-
-function LoadingDots() {
-  return (
-    <div style={styles.loadingDots}>
-      {[0,1,2].map(i => (
-        <div key={i} style={{ width:6, height:6, borderRadius:'50%', background:'#aaa', animation:'bounce 1s infinite', animationDelay:`${i*0.15}s` }}/>
-      ))}
-      <style>{`@keyframes bounce{0%,80%,100%{transform:translateY(0);opacity:0.5}40%{transform:translateY(-4px);opacity:1}}`}</style>
-    </div>
-  );
+function chunkText(text, chunkSize = 1200, overlap = 150) {
+  const paragraphs = text.split(/\n\n+/);
+  const chunks = [];
+  let current = '';
+  for (const para of paragraphs) {
+    if ((current + para).length > chunkSize && current.length > 0) {
+      chunks.push(current.trim());
+      const words = current.split(' ');
+      current = words.slice(-Math.floor(overlap / 6)).join(' ') + '\n\n' + para;
+    } else {
+      current += (current ? '\n\n' : '') + para;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks.filter(c => c.length > 80);
 }
+
+// ── Retrieval: find most relevant chunks ─────────────────────────────────
+
+function scoreChunk(chunk, query) {
+  const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+  const chunkLower = chunk.toLowerCase();
+  let score = 0;
+  for (const word of queryWords) {
+    const regex = new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
+    const matches = (chunkLower.match(regex) || []).length;
+    score += matches * (word.length > 6 ? 2 : 1);
+  }
+  // Boost exact phrase match
+  if (chunkLower.includes(query.toLowerCase().substring(0, 30))) score += 10;
+  return score;
+}
+
+function retrieveRelevantChunks(docs, query, topK = 8) {
+  const allChunks = [];
+  for (const doc of docs) {
+    if (!doc.chunks) continue;
+    for (const chunk of doc.chunks) {
+      allChunks.push({ chunk, docName: doc.name, score: scoreChunk(chunk, query) });
+    }
+  }
+  return allChunks
+    .filter(c => c.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK);
+}
+
+// ── Format AI response text into paragraphs ────────────────────────────────
+
+function FormattedMessage({ text }) {
+  const lines = text.split('\n').filter(l => l.trim());
+  const elements = [];
+  let listItems = [];
+
+  const flushList = () => {
+    if (listItems.length) {
+      elements.push(<ul key={`ul-${elements.length}`}>{listItems}</ul>);
+      listItems = [];
+    }
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^[\-\*•]\s+/.test(line)) {
+      listItems.push(<li key={i}>{line.replace(/^[\-\*•]\s+/, '')}</li>);
+    } else if (/^\d+\.\s+/.test(line)) {
+      listItems.push(<li key={i}>{line.replace(/^\d+\.\s+/, '')}</li>);
+    } else {
+      flushList();
+      if (line.startsWith('**') && line.endsWith('**')) {
+        elements.push(<p key={i}><strong>{line.slice(2, -2)}</strong></p>);
+      } else {
+        elements.push(<p key={i}>{line}</p>);
+      }
+    }
+  }
+  flushList();
+  return <>{elements}</>;
+}
+
+// ── File type helpers ──────────────────────────────────────────────────────
+
+function getDocIcon(filename) {
+  const ext = filename.split('.').pop().toLowerCase();
+  if (ext === 'pdf') return { label: 'PDF', cls: 'pdf' };
+  if (ext === 'docx' || ext === 'doc') return { label: 'DOC', cls: 'docx' };
+  return { label: 'TXT', cls: 'txt' };
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// ── Suggestions ────────────────────────────────────────────────────────────
+
+const SUGGESTIONS = [
+  'What are the key features of this product?',
+  'Summarize the main topics across all documents',
+  'What security certifications or controls are mentioned?',
+  'What integrations or APIs are supported?',
+  'What are the system requirements?',
+  'What SLA or uptime commitments are described?',
+];
+
+// ── Main App ───────────────────────────────────────────────────────────────
 
 export default function App() {
   const [docs, setDocs] = useState([]);
-  const [chunks, setChunks] = useState([]);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [processing, setProcessing] = useState(null);
+  const [apiKey, setApiKey] = useState('server');
+  const [apiKeyValid, setApiKeyValid] = useState(null);
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [error, setError] = useState('');
   const [dragOver, setDragOver] = useState(false);
-  const [selectedType, setSelectedType] = useState(ARTIFACT_TYPES[0]);
   const [ratings, setRatings] = useState({});
-  const fileInputRef = useRef();
-  const chatRef = useRef();
-  const apiKey = process.env.REACT_APP_ANTHROPIC_API_KEY;
 
-  useEffect(() => { if (chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight; }, [messages, loading]);
+  const messagesEndRef = useRef(null);
+  const textareaRef = useRef(null);
+  const fileInputRef = useRef(null);
 
-  async function handleFiles(files) {
-    const newDocs = [], newChunks = [];
-    for (const file of files) {
-      const ext = file.name.split('.').pop().toLowerCase();
-      if (!['pdf','docx','doc','txt','md'].includes(ext)) { alert(`Unsupported: .${ext}`); continue; }
-      setProcessing(file.name);
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
+
+  useEffect(() => {
+    
+  }, [apiKey]);
+
+  // Load PDF.js and Mammoth dynamically
+  useEffect(() => {
+    if (!window['pdfjs-dist/build/pdf']) {
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+      document.head.appendChild(script);
+    }
+    if (!window.mammoth) {
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js';
+      document.head.appendChild(script);
+    }
+  }, []);
+
+  const processFiles = useCallback(async (files) => {
+    const newDocs = [...files].map(file => ({
+      id: `${Date.now()}-${Math.random()}`,
+      name: file.name,
+      size: file.size,
+      status: 'processing',
+      chunks: null,
+      error: null,
+      file,
+    }));
+
+    setDocs(prev => [...prev, ...newDocs]);
+
+    for (const doc of newDocs) {
       try {
-        const text = await extractTextFromFile(file);
-        const fc = chunkText(text, file.name, selectedType);
-        newDocs.push({ name: file.name, type: selectedType, chunks: fc.length });
-        newChunks.push(...fc);
-      } catch(e) { alert(`Could not process ${file.name}: ${e.message}`); }
+        await new Promise(res => setTimeout(res, 100)); // let UI update
+        const text = await extractText(doc.file);
+        const chunks = chunkText(text);
+        setDocs(prev => prev.map(d =>
+          d.id === doc.id ? { ...d, status: 'ready', chunks, charCount: text.length } : d
+        ));
+      } catch (err) {
+        setDocs(prev => prev.map(d =>
+          d.id === doc.id ? { ...d, status: 'error', error: err.message } : d
+        ));
+      }
     }
-    setProcessing(null);
-    if (newDocs.length) { setDocs(p => [...p, ...newDocs]); setChunks(p => [...p, ...newChunks]); }
-  }
+  }, []);
 
-  async function sendMessage(text) {
-    if (!text.trim() || loading) return;
-    setMessages(p => [...p, { role:'user', content:text }]);
+  const handleFileChange = (e) => {
+    if (e.target.files?.length) processFiles(e.target.files);
+    e.target.value = '';
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    if (e.dataTransfer.files?.length) processFiles(e.dataTransfer.files);
+  };
+
+  const removeDoc = (id) => setDocs(prev => prev.filter(d => d.id !== id));
+
+  const readyDocs = docs.filter(d => d.status === 'ready');
+
+
+
+  const sendMessage = async (text) => {
+    const question = (text || input).trim();
+    if (!question || loading) return;
+    
+    if (readyDocs.length === 0) { setError('Please upload at least one document first.'); return; }
+
+    setError('');
     setInput('');
+    setMessages(prev => [...prev, { role: 'user', text: question, id: Date.now() }]);
     setLoading(true);
-    if (chunks.length === 0) {
-      setMessages(p => [...p, { role:'assistant', content:'No documents uploaded yet. Please upload some documents first.', sources:[], noResults:false }]);
-      setLoading(false); return;
-    }
-    const relevant = getRelevantChunks(chunks, text, 8);
-    if (relevant.length === 0) {
-      setMessages(p => [...p, { role:'assistant', content:"I couldn't find information related to that question in the uploaded documents.", sources:[], noResults:true }]);
-      setLoading(false); return;
-    }
-    const contextText = relevant.map((c,i) => `[Source ${i+1}: ${c.source} — ${c.type}]\n${c.text}`).join('\n\n---\n\n');
-    const uniqueSources = [...new Set(relevant.map(c => c.source))];
-    try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          model:'claude-sonnet-4-20250514',
-          max_tokens:1024,
-          system:'You are the Northern Light Knowledge Hub assistant. Answer questions using ONLY the document excerpts provided. Be specific and cite which documents support your answer. If the documents do not contain enough information, say so clearly.',
-          messages:[{ role:'user', content:`Here are relevant excerpts:\n\n${contextText}\n\n---\n\nQuestion: ${text}` }]
-        })
-      });
-      const data = await response.json();
-      if (data.error) throw new Error(data.error.message);
-      const answer = data.content?.[0]?.text || 'No response received.';
-      setMessages(p => [...p, { role:'assistant', content:answer, sources:uniqueSources, noResults:false }]);
-    } catch(e) {
-      setMessages(p => [...p, { role:'assistant', content:`Error: ${e.message}. Check your API key in Vercel environment variables.`, sources:[], noResults:false }]);
-    }
-    setLoading(false);
-  }
 
-  const canSend = input.trim().length > 0 && !loading;
+    try {
+      const relevant = retrieveRelevantChunks(readyDocs, question);
+      const sourceNames = [...new Set(relevant.map(r => r.docName))];
+
+      const contextText = relevant.length > 0
+        ? relevant.map((r, i) => `[Source: ${r.docName}]\n${r.chunk}`).join('\n\n---\n\n')
+        : readyDocs.map(d => d.chunks?.slice(0, 3).join('\n\n') || '').join('\n\n---\n\n');
+
+      const systemPrompt = `You are a knowledgeable assistant for Northern Light, an enterprise knowledge management platform. You answer questions based strictly on the provided document excerpts.
+
+Guidelines:
+- Answer only from the provided context. If the answer isn't in the documents, say so clearly.
+- Be specific and cite which document(s) your answer comes from.
+- Use clear, professional language suitable for Sales, Customer Success, and Product teams.
+- If documents contain conflicting information, note the discrepancy.
+- Keep answers concise but complete — typically 2-5 paragraphs.`;
+
+      const userPrompt = `Here are relevant excerpts from Northern Light's internal documents:
+
+${contextText}
+
+---
+
+Question: ${question}
+
+Please answer based on the document excerpts above. If you reference specific information, mention which document it came from.`;
+
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          
+          
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 1000,
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userPrompt }],
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error?.message || `API error ${res.status}`);
+      }
+
+      const data = await res.json();
+      const answer = data.content?.[0]?.text || 'No response received.';
+      const msgId = Date.now();
+
+      setMessages(prev => [...prev, {
+        role: 'ai',
+        text: answer,
+        sources: sourceNames,
+        id: msgId,
+      }]);
+    } catch (err) {
+      setError(`Error: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  const handleRating = (msgId, value) => {
+    setRatings(prev => ({ ...prev, [msgId]: prev[msgId] === value ? null : value }));
+  };
+
+  const hasContent = messages.length > 0;
 
   return (
-    <div style={styles.app}>
-      <header style={styles.header}>
-        <div style={styles.logoRow}>
-          <div style={styles.logoMark}>
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <circle cx="8" cy="8" r="6" stroke="#7BB8F0" strokeWidth="1.5"/>
-              <path d="M4.5 8L8 4.5L11.5 8L8 11.5Z" fill="#7BB8F0"/>
-              <circle cx="8" cy="8" r="2" fill="white"/>
+    <div className="app">
+      {/* Top bar */}
+      <header className="topbar">
+        <div className="topbar-brand">
+          <div className="topbar-logo">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+              <circle cx="10" cy="10" r="8" stroke="#7BB8F0" strokeWidth="1.5"/>
+              <path d="M6 10L10 6L14 10L10 14Z" fill="#7BB8F0"/>
+              <circle cx="10" cy="10" r="2.5" fill="white"/>
             </svg>
           </div>
           <div>
-            <div style={styles.logoText}>Northern Light</div>
-            <div style={styles.logoSub}>Knowledge Hub POC</div>
+            <div className="topbar-title">Northern Light</div>
+            <div className="topbar-subtitle">Knowledge Hub · POC</div>
           </div>
         </div>
-        <div style={{display:'flex',alignItems:'center',gap:8}}>
-          {processing && <span style={styles.processingBadge}>Processing {processing}…</span>}
-          {docs.length > 0 && <span style={styles.docCount}>{docs.length} doc{docs.length!==1?'s':''} · {chunks.length} chunks</span>}
+        <div className="topbar-right">
+          {readyDocs.length > 0 && (
+            <span className="doc-count-badge">
+              {readyDocs.length} document{readyDocs.length !== 1 ? 's' : ''} loaded
+            </span>
+          )}
         </div>
       </header>
-      <div style={styles.layout}>
-        <div style={styles.sidebar}>
-          <div style={styles.sidebarHead}>Documents</div>
-          <select style={styles.typeSelect} value={selectedType} onChange={e => setSelectedType(e.target.value)}>
-            {ARTIFACT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
-          <div style={{...styles.uploadZone, margin:'8px 12px 0', ...(dragOver?{borderColor:'#1A5FA8',background:'#f0f6ff'}:{})}}
-            onClick={() => fileInputRef.current.click()}
-            onDragOver={e=>{e.preventDefault();setDragOver(true)}}
-            onDragLeave={()=>setDragOver(false)}
-            onDrop={e=>{e.preventDefault();setDragOver(false);handleFiles(Array.from(e.dataTransfer.files))}}>
-            <div style={{fontSize:22,marginBottom:6}}>📎</div>
-            <div style={{fontSize:13,fontWeight:500}}>Drop files or click to upload</div>
-            <div style={{fontSize:11,color:'#999',marginTop:3}}>PDF · DOCX · TXT · MD</div>
+
+      <div className="main-layout">
+        {/* Left panel */}
+        <aside className="left-panel">
+          {/* API Status */}
+          <div className="panel-section">
+            <div className="api-key-status valid" style={{marginTop: 0}}>✓ AI powered by Claude</div>
           </div>
-          <input ref={fileInputRef} type="file" multiple accept=".pdf,.docx,.doc,.txt,.md" style={{display:'none'}} onChange={e=>handleFiles(Array.from(e.target.files))}/>
-          <div style={styles.docList}>
-            {docs.length===0 && <div style={{fontSize:12,color:'#bbb',textAlign:'center',marginTop:16}}>No documents yet</div>}
-            {docs.map(doc => (
-              <div key={doc.name} style={styles.docItem}>
-                <span style={{fontSize:16,flexShrink:0,marginTop:1}}>{fileIcon(doc.name)}</span>
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={styles.docName}>{doc.name}</div>
-                  <div style={styles.docType}>{doc.type} · {doc.chunks} chunks</div>
-                </div>
-                <button style={styles.docRemove} onClick={()=>{setDocs(p=>p.filter(d=>d.name!==doc.name));setChunks(p=>p.filter(c=>c.source!==doc.name));}}>×</button>
+
+          {/* Upload */}
+          <div className="panel-section">
+            <div className="section-label">Upload Documents</div>
+            <div
+              className={`upload-zone ${dragOver ? 'drag-over' : ''}`}
+              onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleDrop}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.docx,.doc,.txt,.md"
+                multiple
+                onChange={handleFileChange}
+              />
+              <div className="upload-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <polyline points="17 8 12 3 7 8"/>
+                  <line x1="12" y1="3" x2="12" y2="15"/>
+                </svg>
               </div>
-            ))}
+              <div className="upload-title">Drop files or click to upload</div>
+              <div className="upload-sub">PDF, Word, or plain text</div>
+            </div>
           </div>
-        </div>
-        <div style={styles.main}>
-          <div ref={chatRef} style={styles.chatArea}>
-            {messages.length===0 && (
-              <div style={styles.emptyState}>
-                <div style={{fontSize:36}}>🔍</div>
-                <div style={styles.emptyTitle}>Ask anything about your documents</div>
-                <div style={styles.emptySub}>Upload Northern Light documents on the left, then ask questions. The system will find relevant information and cite its sources.</div>
-                {docs.length>0 && (
-                  <div style={styles.suggestionRow}>
-                    {['What are the key features of the latest release?','How does the system handle security and compliance?','What integration options are available?','Summarize the main topics in these documents'].map(s=>(
-                      <button key={s} style={styles.suggestionPill} onClick={()=>sendMessage(s)}>{s}</button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {messages.map((msg,i) => (
-              <div key={i} style={{...styles.msgRow,...(msg.role==='user'?styles.msgRowUser:{})}}>
-                <div style={{...styles.avatar,...(msg.role==='user'?styles.avatarUser:styles.avatarAI)}}>{msg.role==='user'?'You':'NL'}</div>
-                <div>
-                  <div style={{...styles.bubble,...(msg.role==='user'?styles.bubbleUser:{})}}>
-                    {msg.noResults?<div style={styles.noResults}>{msg.content}</div>:<div style={{whiteSpace:'pre-wrap'}}>{msg.content}</div>}
-                  </div>
-                  {msg.role==='assistant'&&msg.sources?.length>0&&(
-                    <div style={styles.sources}>{msg.sources.map(s=><span key={s} style={styles.sourceChip}>📄 {s}</span>)}</div>
-                  )}
-                  {msg.role==='assistant'&&!msg.noResults&&(
-                    <div style={styles.ratingRow}>
-                      <span style={styles.ratingLabel}>Helpful?</span>
-                      {['👍','👎'].map(e=>(
-                        <button key={e} style={{...styles.ratingBtn,opacity:ratings[i]===e?1:0.4}} onClick={()=>setRatings(r=>({...r,[i]:e}))}>{e}</button>
-                      ))}
+
+          {/* Document list */}
+          {docs.length > 0 && (
+            <div className="doc-list">
+              {docs.map(doc => {
+                const icon = getDocIcon(doc.name);
+                return (
+                  <div className="doc-item" key={doc.id}>
+                    <div className={`doc-item-icon ${icon.cls}`}>{icon.label}</div>
+                    <div className="doc-item-info">
+                      <div className="doc-item-name" title={doc.name}>{doc.name}</div>
+                      <div className="doc-item-meta">
+                        {doc.status === 'ready' && `${formatBytes(doc.size)} · ${doc.chunks?.length || 0} chunks`}
+                        {doc.status === 'processing' && 'Processing…'}
+                        {doc.status === 'error' && `Error: ${doc.error}`}
+                      </div>
                     </div>
-                  )}
-                </div>
+                    <div className={`doc-item-status ${doc.status}`} title={doc.status} />
+                    <button className="doc-remove" onClick={() => removeDoc(doc.id)} title="Remove">✕</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </aside>
+
+        {/* Right panel — chat */}
+        <main className="right-panel">
+          {!hasContent ? (
+            <div className="empty-state">
+              <div className="empty-icon">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--navy)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="11" cy="11" r="8"/>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                </svg>
               </div>
-            ))}
-            {loading&&<div style={styles.msgRow}><div style={{...styles.avatar,...styles.avatarAI}}>NL</div><div style={styles.bubble}><LoadingDots/></div></div>}
-          </div>
-          <div style={styles.inputArea}>
-            <div style={styles.inputRow}>
-              <textarea style={styles.textarea} value={input}
-                onChange={e=>{setInput(e.target.value);e.target.style.height='auto';e.target.style.height=Math.min(e.target.scrollHeight,120)+'px'}}
-                onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage(input)}}}
-                placeholder={docs.length===0?'Upload documents first, then ask a question…':'Ask a question about your documents…'}
-                rows={1} disabled={loading}/>
-              <button style={{...styles.sendBtn,...(canSend?{}:styles.sendBtnDisabled)}} onClick={()=>sendMessage(input)} disabled={!canSend}>
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 7H12M12 7L7.5 2.5M12 7L7.5 11.5" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              <div className="empty-title">Ask your documents anything</div>
+              <div className="empty-sub">
+                Upload Northern Light documents on the left, then ask questions. The AI answers using only your uploaded content and cites its sources.
+              </div>
+              {readyDocs.length > 0 && (
+                <div className="suggestion-grid">
+                  {SUGGESTIONS.map((s, i) => (
+                    <button key={i} className="suggestion-card" onClick={() => sendMessage(s)}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="chat-messages">
+              {messages.map(msg => (
+                <div key={msg.id} className={`message ${msg.role}`}>
+                  <div className={`message-avatar ${msg.role}`}>
+                    {msg.role === 'ai' ? 'NL' : 'You'}
+                  </div>
+                  <div className="message-body">
+                    <div className="message-bubble">
+                      {msg.role === 'ai'
+                        ? <FormattedMessage text={msg.text} />
+                        : <p>{msg.text}</p>
+                      }
+                    </div>
+                    {msg.role === 'ai' && msg.sources?.length > 0 && (
+                      <div className="sources-row">
+                        {msg.sources.map((s, i) => (
+                          <span key={i} className="source-chip">
+                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                              <polyline points="14 2 14 8 20 8"/>
+                            </svg>
+                            {s}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {msg.role === 'ai' && (
+                      <div className="rating-row">
+                        <span className="rating-label">Helpful?</span>
+                        <button
+                          className={`rating-btn ${ratings[msg.id] === 'up' ? 'active-up' : ''}`}
+                          onClick={() => handleRating(msg.id, 'up')}
+                        >👍</button>
+                        <button
+                          className={`rating-btn ${ratings[msg.id] === 'down' ? 'active-down' : ''}`}
+                          onClick={() => handleRating(msg.id, 'down')}
+                        >👎</button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {loading && (
+                <div className="message ai">
+                  <div className="message-avatar ai">NL</div>
+                  <div className="message-body">
+                    <div className="message-bubble">
+                      <div className="loading-dots">
+                        <span/><span/><span/>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+
+          {/* Errors / warnings */}
+          {error && (
+            <div className="error-banner">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              {error}
+              <button onClick={() => setError('')} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: 'inherit', fontSize: 14 }}>✕</button>
+            </div>
+          )}
+
+          {hasContent && readyDocs.length === 0 && !loading && (
+            <div className="no-docs-warning">
+              ⚠ No documents loaded — upload files on the left to enable Q&A
+            </div>
+          )}
+
+          {/* Input */}
+          <div className="chat-input-area">
+            <div className="chat-input-row">
+              <textarea
+                ref={textareaRef}
+                className="chat-textarea"
+                placeholder={readyDocs.length === 0
+                  ? 'Upload documents first, then ask a question…'
+                  : 'Ask a question about your documents…'
+                }
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                rows={1}
+                disabled={loading}
+              />
+              <button
+                className="send-btn"
+                onClick={() => sendMessage()}
+                disabled={loading || !input.trim()}
+                title="Send (Enter)"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="22" y1="2" x2="11" y2="13"/>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                </svg>
               </button>
             </div>
-            <div style={{fontSize:11,color:'#bbb',marginTop:6,textAlign:'center'}}>Enter to send · Shift+Enter for new line · Answers grounded in uploaded documents only</div>
+            <div className="input-hint">
+              Enter to send · Shift+Enter for new line · Answers grounded in your documents only
+            </div>
           </div>
-        </div>
+        </main>
       </div>
     </div>
   );

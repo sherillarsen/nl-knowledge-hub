@@ -9,7 +9,7 @@ async function extractTextFromPDF(file) {
   pdfjsLib.GlobalWorkerOptions.workerSrc =
     `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
   const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const pdf = await pdfjsLib.getDocument({ data: arrayhBuffer }).promise;
   let text = '';
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
@@ -325,14 +325,10 @@ Please answer based on the document excerpts above. If you reference specific in
     <div className="app">
       {/* Top bar */}
       <header className="topbar">
-        <div className="topbar-brand">
-          <div className="topbar-logo">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-              <circle cx="10" cy="10" r="8" stroke="#7BB8F0" strokeWidth="1.5"/>
-              <path d="M6 10L10 6L14 10L10 14Z" fill="#7BB8F0"/>
-              <circle cx="10" cy="10" r="2.5" fill="white"/>
-            </svg>
-          </div>
+          <div className="topbar-brand">
+            <div className="topbar-logo">
+            <img src="/Webclip_white.png" alt="Northern Light" style={{width:30,height:30,borderRadius:7,objectFit:'cover'}} />
+            </div>
           <div>
             <div className="topbar-title">Northern Light</div>
             <div className="topbar-subtitle">Knowledge Hub · POC</div>

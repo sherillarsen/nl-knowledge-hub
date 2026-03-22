@@ -1,15 +1,13 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import './App.css';
+import * as pdfjsLib from 'pdfjs-dist';
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
 
 // ── Text extraction utilities ──────────────────────────────────────────────
 
 async function extractTextFromPDF(file) {
-  const pdfjsLib = window['pdfjs-dist/build/pdf'];
-  if (!pdfjsLib) throw new Error('PDF library not loaded');
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
   const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayhBuffer }).promise;
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   let text = '';
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
@@ -19,9 +17,9 @@ async function extractTextFromPDF(file) {
   return text.trim();
 }
 
+import * as mammoth from 'mammoth';
+
 async function extractTextFromDocx(file) {
-  const mammoth = window.mammoth;
-  if (!mammoth) throw new Error('Mammoth library not loaded');
   const arrayBuffer = await file.arrayBuffer();
   const result = await mammoth.extractRawText({ arrayBuffer });
   return result.value.trim();
@@ -138,14 +136,47 @@ function formatBytes(bytes) {
 
 // ── Suggestions ────────────────────────────────────────────────────────────
 
-const SUGGESTIONS = [
-  'What are the key features of this product?',
-  'Summarize the main topics across all documents',
-  'What security certifications or controls are mentioned?',
-  'What integrations or APIs are supported?',
-  'What are the system requirements?',
-  'What SLA or uptime commitments are described?',
-];
+const PERSONA_CONFIG = {
+  sales: {
+    label: 'Sales',
+    color: '#0F2A4A',
+    description: 'Answers framed for prospects — latest version, value, and positioning',
+    suggestions: [
+      'What are the key differentiators of Northern Light?',
+      'How does NL handle enterprise search at scale?',
+      'What integrations and APIs are supported?',
+      'What security and compliance certifications does NL hold?',
+      'What does a typical deployment look like?',
+      'What is the ROI story for new customers?',
+    ],
+    systemPrompt: `You are a Sales assistant for Northern Light, an enterprise knowledge management platform. Answer questions based strictly on the provided document excerpts, framed for a sales context.
+- Always answer based on the latest/current version of the product
+- Frame answers around customer value and business outcomes
+- Be specific and cite which document(s) your answer comes from
+- Keep answers concise and customer-ready (2-4 paragraphs)
+- If a capability is not in the documents, say so clearly rather than speculating`,
+  },
+  product: {
+    label: 'Product',
+    color: '#1A5FA8',
+    description: 'Answers focused on patterns, gaps, and insights across the corpus',
+    suggestions: [
+      'What feature requests or pain points appear most often?',
+      'What changed between product versions?',
+      'What topics are covered across these documents?',
+      'What gaps or missing capabilities are mentioned?',
+      'What customer use cases are described?',
+      'Summarize key themes across all uploaded documents',
+    ],
+    systemPrompt: `You are a Product Intelligence assistant for Northern Light. Analyze the provided document excerpts to surface insights, patterns, and themes.
+- Look for recurring themes, feature requests, and pain points across documents
+- Note version differences and how the product has evolved
+- Identify gaps — things customers ask about that are not well documented
+- Synthesize across multiple documents rather than answering from just one
+- Be analytical — this audience wants insights, not just answers
+- Cite which documents support your observations`,
+  },
+};
 
 // ── Main App ───────────────────────────────────────────────────────────────
 
@@ -160,6 +191,7 @@ export default function App() {
   const [error, setError] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [ratings, setRatings] = useState({});
+  const [persona, setPersona] = useState('sales');
 
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
@@ -172,20 +204,6 @@ export default function App() {
   useEffect(() => {
     
   }, [apiKey]);
-
-  // Load PDF.js and Mammoth dynamically
-  useEffect(() => {
-    if (!window['pdfjs-dist/build/pdf']) {
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
-      document.head.appendChild(script);
-    }
-    if (!window.mammoth) {
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js';
-      document.head.appendChild(script);
-    }
-  }, []);
 
   const processFiles = useCallback(async (files) => {
     const newDocs = [...files].map(file => ({
@@ -252,14 +270,7 @@ export default function App() {
         ? relevant.map((r, i) => `[Source: ${r.docName}]\n${r.chunk}`).join('\n\n---\n\n')
         : readyDocs.map(d => d.chunks?.slice(0, 3).join('\n\n') || '').join('\n\n---\n\n');
 
-      const systemPrompt = `You are a knowledgeable assistant for Northern Light, an enterprise knowledge management platform. You answer questions based strictly on the provided document excerpts.
-
-Guidelines:
-- Answer only from the provided context. If the answer isn't in the documents, say so clearly.
-- Be specific and cite which document(s) your answer comes from.
-- Use clear, professional language suitable for Sales, Customer Success, and Product teams.
-- If documents contain conflicting information, note the discrepancy.
-- Keep answers concise but complete — typically 2-5 paragraphs.`;
+      const systemPrompt = PERSONA_CONFIG[persona].systemPrompt;
 
       const userPrompt = `Here are relevant excerpts from Northern Light's internal documents:
 
@@ -325,19 +336,31 @@ Please answer based on the document excerpts above. If you reference specific in
     <div className="app">
       {/* Top bar */}
       <header className="topbar">
-          <div className="topbar-brand">
-            <div className="topbar-logo">
-            <img src="/Webclip%20white.png" alt="Northern Light" style={{width:30,height:30,borderRadius:7,objectFit:'cover'}} />
-            </div>
+        <div className="topbar-brand">
+          <div className="topbar-logo">
+            <img src="/Webclip%20white.png" alt="Northern Light" style={{width:36,height:36,objectFit:'contain'}} />
+          </div>
           <div>
             <div className="topbar-title">Northern Light</div>
             <div className="topbar-subtitle">Knowledge Hub · POC</div>
           </div>
         </div>
         <div className="topbar-right">
+          <div className="persona-switcher">
+            {Object.entries(PERSONA_CONFIG).map(([key, cfg]) => (
+              <button
+                key={key}
+                className={"persona-btn" + (persona === key ? ' active' : '')}
+                style={persona === key ? {background: cfg.color, color: '#fff', borderColor: cfg.color} : {}}
+                onClick={() => setPersona(key)}
+              >
+                {cfg.label}
+              </button>
+            ))}
+          </div>
           {readyDocs.length > 0 && (
             <span className="doc-count-badge">
-              {readyDocs.length} document{readyDocs.length !== 1 ? 's' : ''} loaded
+              {readyDocs.length} doc{readyDocs.length !== 1 ? 's' : ''}
             </span>
           )}
         </div>
@@ -415,12 +438,15 @@ Please answer based on the document excerpts above. If you reference specific in
                 </svg>
               </div>
               <div className="empty-title">Ask your documents anything</div>
+              <div className="persona-badge" style={{background: PERSONA_CONFIG[persona].color}}>
+                {PERSONA_CONFIG[persona].label} view
+              </div>
               <div className="empty-sub">
-                Upload Northern Light documents on the left, then ask questions. The AI answers using only your uploaded content and cites its sources.
+                {PERSONA_CONFIG[persona].description}. Upload documents on the left then ask a question.
               </div>
               {readyDocs.length > 0 && (
                 <div className="suggestion-grid">
-                  {SUGGESTIONS.map((s, i) => (
+                  {PERSONA_CONFIG[persona].suggestions.map((s, i) => (
                     <button key={i} className="suggestion-card" onClick={() => sendMessage(s)}>
                       {s}
                     </button>
